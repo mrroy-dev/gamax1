@@ -162,6 +162,7 @@ class BPETokenizer:
 
     _pattern = re.compile(r"\s*\w+|\s+|[^\w\s]+", re.UNICODE)
     min_pair_count = 2
+    progress_interval_chars = 50_000_000
 
     def __init__(self, text: str = None, vocab_size: int = 8000, merges: list = None,
                  sample_chars: int = 3_000_000):
@@ -272,6 +273,9 @@ class BPETokenizer:
 
     def encode(self, text: str):
         ids = []
+        processed_chars = 0
+        next_progress = self.progress_interval_chars
+        total_chars = len(text)
         for unit in self._pattern.findall(text):
             b = unit.encode("utf-8")
             i = 0
@@ -293,6 +297,11 @@ class BPETokenizer:
                         last_j = j
                 ids.append(last_id)
                 i = last_j
+            processed_chars += len(unit)
+            if processed_chars >= next_progress:
+                percent = 100.0 * processed_chars / total_chars if total_chars else 100.0
+                print(f"Encoded {processed_chars:,} / {total_chars:,} chars ({percent:.1f}%)")
+                next_progress += self.progress_interval_chars
         return ids
 
     def decode(self, ids):

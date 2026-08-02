@@ -382,7 +382,18 @@ def main():
         warning = word_tokenizer_warning(args.tokenizer, word_tokens, tok.vocab_size)
         if warning:
             print(warning)
-        data = torch.tensor(tok.encode(text), dtype=torch.long)
+        if args.tokenizer == "bpe":
+            data_path = os.path.abspath(args.data)
+            cache_path = f"{data_path}.bpe{args.bpe_vocab_size}.encoded.pt"
+            if os.path.exists(cache_path):
+                data = torch.load(cache_path, map_location="cpu")
+                print(f"Using cached BPE encoding: {cache_path}")
+            else:
+                data = torch.tensor(tok.encode(text), dtype=torch.long)
+                torch.save(data, cache_path)
+                print(f"Performed fresh BPE encode and cached it at: {cache_path}")
+        else:
+            data = torch.tensor(tok.encode(text), dtype=torch.long)
         corpus_description = f"{len(text):,} chars"
     if len(data) <= args.block_size + 1:
         raise ValueError("corpus must contain more tokens than block_size + 1")
