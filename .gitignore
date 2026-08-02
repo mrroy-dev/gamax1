@@ -23,6 +23,9 @@ checkpoints_*/
 data/*.txt
 data/*.json
 data/*.csv
+data/books
+data/
+data/bulk_cache/
 
 # Local logs and experiment outputs
 *.log
@@ -42,4 +45,3 @@ Thumbs.db
 build/
 dist/
 *.egg-info/
-

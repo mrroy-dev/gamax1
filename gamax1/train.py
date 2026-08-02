@@ -10,6 +10,7 @@ import torch
 
 from .model import GamaX1Model
 from .tokenizer import BPETokenizer, CharTokenizer, WordTokenizer, word_tokenizer_warning
+from .bulk_corpus import build_or_load_bulk_tokens
 
 
 def perplexity(loss: float) -> float:
@@ -185,7 +186,9 @@ def get_batch(
         ix = start_indices[torch.randint(len(start_indices), (batch_size,))]
     x = torch.stack([data[i:i + block_size] for i in ix])
     y = torch.stack([data[i + 1:i + 1 + block_size] for i in ix])
-    return x.to(device), y.to(device)
+    # Bulk caches are int32 to keep the on-disk footprint small. Convert only
+    # the sampled batch to the Long dtype required by cross-entropy.
+    return x.to(device=device, dtype=torch.long), y.to(device=device, dtype=torch.long)
 
 
 def split_training_windows(
@@ -272,6 +275,12 @@ def main():
     parser = argparse.ArgumentParser(description="Train GamaX1 on a text corpus.")
     parser.add_argument("--data", type=str, default=os.path.join(
         os.path.dirname(__file__), "..", "data", "sample_corpus.txt"))
+    parser.add_argument("--data_dir", type=str, default=None,
+                        help="Recursive directory of .txt books for bulk training. Uses BPE and a memory-mapped token cache.")
+    parser.add_argument("--bulk_cache_dir", type=str, default="data/bulk_cache",
+                        help="Directory for the bulk int32 token cache (default: data/bulk_cache).")
+    parser.add_argument("--rebuild_bulk_cache", action="store_true",
+                        help="Re-encode all books even if the bulk token cache is reusable.")
     parser.add_argument("--out_dir", type=str, default="checkpoints")
     parser.add_argument("--d_model", type=int, default=256)
     parser.add_argument("--n_heads", type=int, default=4)
@@ -324,6 +333,8 @@ def main():
     parser.add_argument("--hex_influence", action="store_true")
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
+    if args.data_dir and args.tokenizer != "bpe":
+        parser.error("--data_dir requires --tokenizer bpe")
     if args.warmup_steps is None:
         args.warmup_steps = max(100, args.max_steps // 20)
 
@@ -337,31 +348,48 @@ def main():
                 setattr(args, key, saved_cfg[key])
     print(f"Using device: {device}")
 
-    with open(args.data, "r", encoding="utf-8") as f:
-        text = f.read()
-    tok_cls = tokenizer_class(args.tokenizer)
-    if resume_ckpt:
-        if args.tokenizer == "bpe" and resume_ckpt.get("merges") is not None:
-            tok = BPETokenizer(merges=resume_ckpt["merges"])
-        else:
-            tok = tok_cls(vocab=resume_ckpt["vocab"])
-    elif args.tokenizer == "bpe":
-        tok = BPETokenizer(text, vocab_size=args.bpe_vocab_size, sample_chars=args.bpe_sample_chars)
-    elif args.tokenizer == "word":
-        tok = WordTokenizer(text, max_vocab_size=args.max_vocab_size)
+    bulk_store = None
+    if args.data_dir:
+        saved_tokenizer = BPETokenizer(merges=resume_ckpt["merges"]) if resume_ckpt else None
+        tok, bulk_store, bulk_metadata = build_or_load_bulk_tokens(
+            args.data_dir, args.bulk_cache_dir,
+            bpe_vocab_size=args.bpe_vocab_size,
+            bpe_sample_chars=args.bpe_sample_chars,
+            tokenizer=saved_tokenizer,
+            rebuild=args.rebuild_bulk_cache,
+        )
+        # Keep the int32 memory-map view. Converting here would duplicate the
+        # full cache as an 8-byte-per-token tensor in RAM.
+        data = bulk_store.tensor
+        text = None
+        corpus_description = f"{bulk_metadata['file_count']:,} books"
     else:
-        tok = CharTokenizer(text)
-    word_tokens = len(WordTokenizer._tokenize(text)) if args.tokenizer == "word" else 0
-    warning = word_tokenizer_warning(args.tokenizer, word_tokens, tok.vocab_size)
-    if warning:
-        print(warning)
-    data = torch.tensor(tok.encode(text), dtype=torch.long)
+        with open(args.data, "r", encoding="utf-8") as f:
+            text = f.read()
+        tok_cls = tokenizer_class(args.tokenizer)
+        if resume_ckpt:
+            if args.tokenizer == "bpe" and resume_ckpt.get("merges") is not None:
+                tok = BPETokenizer(merges=resume_ckpt["merges"])
+            else:
+                tok = tok_cls(vocab=resume_ckpt["vocab"])
+        elif args.tokenizer == "bpe":
+            tok = BPETokenizer(text, vocab_size=args.bpe_vocab_size, sample_chars=args.bpe_sample_chars)
+        elif args.tokenizer == "word":
+            tok = WordTokenizer(text, max_vocab_size=args.max_vocab_size)
+        else:
+            tok = CharTokenizer(text)
+        word_tokens = len(WordTokenizer._tokenize(text)) if args.tokenizer == "word" else 0
+        warning = word_tokenizer_warning(args.tokenizer, word_tokens, tok.vocab_size)
+        if warning:
+            print(warning)
+        data = torch.tensor(tok.encode(text), dtype=torch.long)
+        corpus_description = f"{len(text):,} chars"
     if len(data) <= args.block_size + 1:
         raise ValueError("corpus must contain more tokens than block_size + 1")
     train_data, val_data, train_starts, val_starts = split_training_windows(
         data, args.block_size, strategy=args.validation_split, seed=args.validation_split_seed,
     )
-    print(f"Corpus: {len(text):,} chars, vocab size {tok.vocab_size} ({args.tokenizer})")
+    print(f"Corpus: {corpus_description}, {len(data):,} tokens, vocab size {tok.vocab_size} ({args.tokenizer})")
 
     auto_size_result = None
     if args.auto_size_model and not resume_ckpt:
@@ -486,6 +514,9 @@ def main():
     ckpt_path = os.path.join(args.out_dir, "gamax1.pt")
     save_checkpoint(ckpt_path, model, optimizer, tok, vars(args), final_step)
     tok.save(os.path.join(args.out_dir, "tokenizer.json"))
+    if bulk_store is not None:
+        del data
+        bulk_store.close()
 
 
 if __name__ == "__main__":

@@ -91,6 +91,17 @@ python -m gamax1.train --validation_split tail
 # Let the safety net choose a viable architecture for this corpus
 python -m gamax1.train --tokenizer bpe --data data/sample_corpus_combined.txt --auto_size_model
 
+# Train on a directory containing many .txt books (for example data/books)
+# The first run builds a memory-mapped token cache; later runs reuse it.
+python -m gamax1.train --data_dir data/books --tokenizer bpe \
+  --bulk_cache_dir data/bulk_cache --auto_size_model --max_steps 10000 \
+  --out_dir checkpoints/books
+
+# Resume a bulk run without rebuilding the token cache
+python -m gamax1.train --data_dir data/books --tokenizer bpe \
+  --bulk_cache_dir data/bulk_cache --resume_from checkpoints/books/gamax1.pt \
+  --max_steps 20000 --out_dir checkpoints/books
+
 # Word-level demo on the bundled combined corpus
 python run_demo.py --tokenizer word --corpus large
 
@@ -130,6 +141,16 @@ tokens per byte than word tokenization, which directly improves next-token
 modeling quality. BPE pair statistics are learned from the first
 `--bpe_sample_chars` characters (default 3M, a deliberate speed/quality
 trade-off) and are saved in checkpoints so `generate` restores them exactly.
+
+### Bulk book directories
+
+`--data_dir` recursively finds `.txt` files, trains a byte-level BPE tokenizer
+from a bounded sample, and writes `tokens.int32.bin` plus metadata under
+`--bulk_cache_dir`. Each book is encoded one at a time, so the source directory
+does not need to be concatenated into a giant in-memory string. Training reads
+the resulting token file with a memory map. Bulk mode currently requires
+`--tokenizer bpe`; use `--rebuild_bulk_cache` after changing the source books or
+BPE settings. The cache is derived data and should not be committed to git.
 
 ## Avoiding memorization
 
