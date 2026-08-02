@@ -1,0 +1,45 @@
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+
+# Model checkpoints and training outputs
+checkpoints/
+checkpoints_*/
+*.pt
+*.pth
+*.ckpt
+
+# Generated or downloaded corpora
+data/*.txt
+data/*.json
+data/*.csv
+
+# Local logs and experiment outputs
+*.log
+wandb/
+tensorboard/
+
+# Colab/runtime artifacts
+.ipynb_checkpoints/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Build/package artifacts
+build/
+dist/
+*.egg-info/
+
