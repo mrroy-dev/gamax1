@@ -272,6 +272,27 @@ def build_or_load_bulk_tokens(
     if not rebuild and token_path.exists() and meta_path.exists():
         metadata = json.loads(meta_path.read_text(encoding="utf-8"))
         reusable = all(metadata.get(key) == value for key, value in expected.items())
+        if reusable:
+            # Guard against a stale metadata.json pointing at a tokens.int32.bin
+            # that was later truncated/partially overwritten by a separate,
+            # interrupted encode pass over the same cache_dir (e.g. a second
+            # run that opened the file in "wb" mode and crashed partway
+            # through). Without this check, BulkTokenStore's torch.frombuffer
+            # would either raise a confusing ValueError or, worse, silently
+            # succeed on a corrupt/undersized buffer.
+            expected_bytes = int(metadata["token_count"]) * array("I").itemsize
+            actual_bytes = token_path.stat().st_size
+            if actual_bytes != expected_bytes:
+                print(
+                    f"WARNING: cache mismatch for {token_path} — metadata.json "
+                    f"claims {metadata['token_count']:,} tokens "
+                    f"({expected_bytes:,} bytes), but the file is "
+                    f"{actual_bytes:,} bytes. This cache is corrupt (likely an "
+                    f"interrupted rebuild truncated it after metadata.json was "
+                    f"already written). Forcing a full re-encode instead of "
+                    f"trusting it."
+                )
+                reusable = False
 
     if not reusable:
         # Check whether an interrupted encode pass for this exact corpus can
@@ -350,5 +371,18 @@ def build_or_load_bulk_tokens(
         print(f"Reusing bulk token cache: {token_path} ({token_count:,} tokens)")
         if "source_token_counts" in metadata:
             print(f"  by source: {metadata['source_token_counts']}")
+
+    # Final safety net: verify the file on disk actually matches what we're
+    # about to claim, regardless of which code path produced `metadata`.
+    final_expected_bytes = int(metadata["token_count"]) * array("I").itemsize
+    final_actual_bytes = token_path.stat().st_size
+    if final_actual_bytes != final_expected_bytes:
+        raise RuntimeError(
+            f"Bulk token cache is corrupt: {token_path} is "
+            f"{final_actual_bytes:,} bytes, but metadata.json claims "
+            f"{metadata['token_count']:,} tokens "
+            f"({final_expected_bytes:,} bytes). Delete this cache_dir and "
+            f"re-run to force a clean re-encode."
+        )
 
     return tokenizer, BulkTokenStore(token_path, int(metadata["token_count"])), metadata
