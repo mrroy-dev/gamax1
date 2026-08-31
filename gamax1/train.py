@@ -223,6 +223,7 @@ def split_training_windows(
 def evaluate_loss(
     model: GamaX1Model, data: torch.Tensor, block_size: int, eval_batch_size: int,
     eval_batches: int, device: str, k: int = None, start_indices: torch.Tensor = None,
+    use_amp: bool = False,
 ) -> float:
     """Return the mean loss across independent validation batches.
 
@@ -235,7 +236,9 @@ def evaluate_loss(
     with torch.no_grad():
         for _ in range(eval_batches):
             xb, yb = get_batch(data, block_size, eval_batch_size, device, start_indices)
-            _, loss = model(xb, targets=yb, k=k)
+            with torch.autocast(device_type="cuda", dtype=torch.float16,
+                                enabled=use_amp and device.startswith("cuda")):
+                _, loss = model(xb, targets=yb, k=k)
             losses.append(loss.item())
     return sum(losses) / len(losses)
 
@@ -332,6 +335,8 @@ def main():
                              "Ignored by the character and BPE tokenizers.")
     parser.add_argument("--hex_influence", action="store_true")
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--no_amp", action="store_true",
+                        help="Disable CUDA mixed-precision training (uses more GPU memory).")
     args = parser.parse_args()
     if args.data_dir and args.tokenizer != "bpe":
         parser.error("--data_dir requires --tokenizer bpe")
@@ -439,6 +444,10 @@ def main():
         hex_influence=args.hex_influence, sparsity_k_init=max(1, args.n_features // 2),
         sparsity_k_min=max(1, args.n_features // 8),
     ).to(device)
+    use_amp = device.startswith("cuda") and not args.no_amp
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    if use_amp:
+        print("CUDA mixed precision: enabled (use --no_amp to disable)")
     optimizer = create_optimizer(model, args.lr, args.weight_decay)
     start_step = 0
     if resume_ckpt:
@@ -466,11 +475,14 @@ def main():
         model.train()
         xb, yb = get_batch(train_data, args.block_size, args.batch_size, device, train_starts)
         k = model.sparsity_ctrl.k
-        _, loss = model(xb, targets=yb, k=k)
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+            _, loss = model(xb, targets=yb, k=k)
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
         model.sparsity_ctrl.step(loss.item())
         recent_training_losses.append(loss.item())
         recent_training_losses = recent_training_losses[-args.eval_batches:]
@@ -483,6 +495,7 @@ def main():
             val_value = evaluate_loss(
                 model, val_data, args.block_size, args.eval_batch_size,
                 args.eval_batches, device, k=model.sparsity_ctrl.k, start_indices=val_starts,
+                use_amp=use_amp,
             )
             train_value = sum(recent_training_losses) / len(recent_training_losses)
             train_history.append(train_value)

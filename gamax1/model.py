@@ -68,7 +68,9 @@ class CausalSelfAttention(nn.Module):
         self.qkv = nn.Linear(d_model, 3 * d_model)
         self.out_proj = nn.Linear(d_model, d_model)
         self.dropout = nn.Dropout(dropout)
-        mask = torch.tril(torch.ones(max_seq_len, max_seq_len)).view(1, 1, max_seq_len, max_seq_len)
+        mask = torch.tril(torch.ones(max_seq_len, max_seq_len, dtype=torch.bool)).view(
+            1, 1, max_seq_len, max_seq_len
+        )
         self.register_buffer("causal_mask", mask)
 
     def forward(self, x):
@@ -76,11 +78,14 @@ class CausalSelfAttention(nn.Module):
         qkv = self.qkv(x).view(B, T, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]  # (B, n_heads, T, head_dim)
 
-        att = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        att = att.masked_fill(self.causal_mask[:, :, :T, :T] == 0, float("-inf"))
-        att = F.softmax(att, dim=-1)
-        att = self.dropout(att)
-        out = att @ v  # (B, n_heads, T, head_dim)
+        # SDPA selects FlashAttention or the memory-efficient CUDA kernel
+        # when available, avoiding materializing the full attention matrix.
+        # This is important for long contexts and larger training batches.
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=self.causal_mask[:, :, :T, :T],
+            dropout_p=self.dropout.p if self.training else 0.0,
+        )  # (B, n_heads, T, head_dim)
         out = out.transpose(1, 2).contiguous().view(B, T, C)
         return self.out_proj(out)
 
